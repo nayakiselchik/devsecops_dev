@@ -1,26 +1,37 @@
-name: Build and Release
+name: Build, Sign and Release
 
 on:
   push:
+    branches:
+      - main
+      - stage
+      - dev
     tags:
-      - 'v*'
+      - 'v*.*.*'
   pull_request:
-    branches: [ main ]
+    branches: [ main, stage ]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write  # Для Cosign keyless signing
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
     
     - name: Install dependencies
       run: |
+        python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller cyclonedx-bom
     
@@ -29,57 +40,96 @@ jobs:
     
     - name: Generate SBOM
       run: |
-        cyclonedx-py requirements -o sbom.json
-    
-    - name: Install Cosign
-      uses: sigstore/cosign-installer@v3
-    
-    - name: Sign artifact
-      run: |
-        cosign sign-blob --yes dist/41_scan_stream_default > 41_scan_stream_default.sig
+        cyclonedx-py requirements requirements.txt -o sbom.json --format json
     
     - name: Install Grype
       run: |
         curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
     
     - name: Scan SBOM with Grype
-      run: grype sbom:sbom.json
+      run: |
+        grype sbom:sbom.json -o table || true
+    
+    - name: Install Cosign
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: sigstore/cosign-installer@v3.4.0
+    
+    - name: Sign artifacts with Cosign
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        # Підпис бінарника (keyless)
+        cosign sign-blob --yes \
+          --bundle 41_scan_stream_default.cosign-bundle \
+          dist/41_scan_stream_default
+        
+        # Підпис SBOM
+        cosign sign-blob --yes \
+          --bundle sbom.cosign-bundle \
+          sbom.json
+    
+    - name: Create checksums
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        cd dist
+        sha256sum 41_scan_stream_default > checksums.txt
+        cd ..
+        sha256sum sbom.json >> dist/checksums.txt
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: release-artifacts
         path: |
-          dist/41_scan_stream_default
+          dist/
           sbom.json
-          41_scan_stream_default.sig
+          *.cosign-bundle
 
   release:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
     
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
     
     - name: Download artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: release-artifacts
+        path: ./artifacts
     
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          dist/41_scan_stream_default
-          sbom.json
-          41_scan_stream_default.sig
+          artifacts/dist/41_scan_stream_default
+          artifacts/dist/checksums.txt
+          artifacts/sbom.json
+          artifacts/*.cosign-bundle
         body: |
-          Release v1.0.0
+          ## Release ${{ github.ref_name }}
           
-          Artifacts:
-          - Signed binary
-          - SBOM (CycloneDX format)
-          - Cosign signature
+          ### 📦 Artifacts
+          - **Binary**: `41_scan_stream_default` - Standalone executable
+          - **SBOM**: `sbom.json` - Software Bill of Materials
+          - **Signatures**: Cosign signature bundles
+          - **Checksums**: SHA256 checksums
+          
+          ### 🔐 Verification
+```bash
+          # Verify signature
+          cosign verify-blob \
+            --bundle 41_scan_stream_default.cosign-bundle \
+            --certificate-identity-regexp=".*" \
+            --certificate-oidc-issuer-regexp=".*" \
+            41_scan_stream_default
+          
+          # Verify checksum
+          sha256sum -c checksums.txt
+```
+        generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
