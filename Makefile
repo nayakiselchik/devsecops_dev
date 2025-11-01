@@ -1,34 +1,65 @@
-.PHONY: install build clean sbom scan sign
+# -------- Configuration --------
+APP_NAME    ?= 41_scan_stream_default
+ENTRYPOINT  ?= 41_scan_stream_default.py
+PYTHON      ?= python3
+PYINSTALLER ?= pyinstaller
 
-APP=41_scan_stream_default.py
-DIST_DIR=dist
-ART_DIR=artifacts
+# Вихідні каталоги PyInstaller
+BUILD_DIR   := build
+DIST_DIR    := dist
 
-install:
-	pip install -r requirements.txt
+# Додаткові опції PyInstaller (за потреби додавай свої)
+PYI_FLAGS   := --onefile --clean --name $(APP_NAME) --console
 
-fetch:
-	bash fetch_source.sh
+# -------- Phony targets --------
+.PHONY: all build rebuild run clean distclean check
 
-build: fetch
-	pip install pyinstaller >/dev/null
-	mkdir -p $(DIST_DIR) $(ART_DIR)
-	pyinstaller --onefile $(APP) --name scan_stream
-	# Зібрати артефакт коду (джерела + бінарник)
-	zip -j $(ART_DIR)/artifact.zip $(APP) dist/scan_stream* || true
+all: build
 
-sbom:
-	# Локально: якщо syft встановлено, згенерувати SBOM
-	which syft >/dev/null && syft packages dir:. -o spdx-json > sbom.spdx.json || echo "Install syft to generate SBOM"
-	which syft >/dev/null && syft packages dir:. -o cyclonedx-json > sbom.cyclonedx.json || true
+# Перевіряємо наявність вхідної точки
+check:
+	@if [ ! -f "$(ENTRYPOINT)" ]; then \
+		echo "ERROR: ENTRYPOINT '$(ENTRYPOINT)' не знайдено. Задай правильний шлях: make build ENTRYPOINT=src/main.py"; \
+		exit 1; \
+	fi
 
-scan:
-	# Локально: якщо grype встановлено, просканувати SBOM
-	which grype >/dev/null && grype sbom:./sbom.spdx.json -o json > vulnerabilities.json || echo "Install grype to scan SBOM"
+# Основна збірка "псевдобінарника"
+build: check
+	@echo "==> Building $(APP_NAME) from $(ENTRYPOINT)"
+	$(PYINSTALLER) $(PYI_FLAGS) $(ENTRYPOINT)
+	@# Переконуємося, що артефакт існує саме там, де очікує CI
+	@if [ ! -f "$(DIST_DIR)/$(APP_NAME)" ]; then \
+		echo "ERROR: Не знайдено артефакт $(DIST_DIR)/$(APP_NAME). Перевір конфіг PyInstaller."; \
+		exit 1; \
+	fi
+	@echo "==> Done. Artifact: $(DIST_DIR)/$(APP_NAME)"
 
-sign:
-	# Локально: якщо cosign встановлено, підписати артефакт
-	COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes --output-signature artifacts/artifact.zip.sig --output-certificate artifacts/artifact.zip.pem artifacts/artifact.zip || echo "Install cosign to sign"
+# Повна перебудова з очищенням тимчасових файлів PyInstaller
+rebuild: distclean build
 
+# Локальний запуск зібраного артефакту (зручно для швидкої перевірки)
+run: build
+	@echo "==> Running ./$(DIST_DIR)/$(APP_NAME)"
+	@./$(DIST_DIR)/$(APP_NAME)
+
+# Прибирання тимчасових файлів PyInstaller
 clean:
-	rm -rf build/ dist/ *.spec __pycache__/ $(ART_DIR)/ sbom*.json vulnerabilities.json
+	@echo "==> Cleaning intermediate files"
+	@rm -rf "$(BUILD_DIR)" *.spec __pycache__
+
+# Повне очищення (у т.ч. артефактів)
+distclean: clean
+	@echo "==> Removing dist artifacts"
+	@rm -rf "$(DIST_DIR)"
+
+# Друк корисної довідки
+help:
+	@echo "Targets:"
+	@echo "  make build        - зібрати псевдобінарник у dist/$(APP_NAME)"
+	@echo "  make rebuild      - повна перебудова (distclean + build)"
+	@echo "  make run          - запустити зібраний бінарник"
+	@echo "  make clean        - прибрати тимчасові файли PyInstaller"
+	@echo "  make distclean    - повністю прибрати dist/ і build/"
+	@echo "Vars (override via CLI):"
+	@echo "  APP_NAME=<name>   - ім'я артефакту (default: $(APP_NAME))"
+	@echo "  ENTRYPOINT=<path> - шлях до main .py (default: $(ENTRYPOINT))"
