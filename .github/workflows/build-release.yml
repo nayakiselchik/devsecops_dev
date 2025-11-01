@@ -14,7 +14,7 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write  # Для Cosign keyless signing
+  id-token: write
 
 jobs:
   build:
@@ -57,15 +57,8 @@ jobs:
     - name: Sign artifacts with Cosign
       if: startsWith(github.ref, 'refs/tags/')
       run: |
-        # Підпис бінарника (keyless)
-        cosign sign-blob --yes \
-          --bundle 41_scan_stream_default.cosign-bundle \
-          dist/41_scan_stream_default
-        
-        # Підпис SBOM
-        cosign sign-blob --yes \
-          --bundle sbom.cosign-bundle \
-          sbom.json
+        cosign sign-blob --yes --bundle 41_scan_stream_default.cosign-bundle dist/41_scan_stream_default
+        cosign sign-blob --yes --bundle sbom.cosign-bundle sbom.json
     
     - name: Create checksums
       if: startsWith(github.ref, 'refs/tags/')
@@ -110,26 +103,13 @@ jobs:
           artifacts/sbom.json
           artifacts/*.cosign-bundle
         body: |
-          ## Release ${{ github.ref_name }}
+          Release ${{ github.ref_name }}
           
-          ### 📦 Artifacts
-          - **Binary**: `41_scan_stream_default` - Standalone executable
-          - **SBOM**: `sbom.json` - Software Bill of Materials
-          - **Signatures**: Cosign signature bundles
-          - **Checksums**: SHA256 checksums
-          
-          ### 🔐 Verification
-```bash
-          # Verify signature
-          cosign verify-blob \
-            --bundle 41_scan_stream_default.cosign-bundle \
-            --certificate-identity-regexp=".*" \
-            --certificate-oidc-issuer-regexp=".*" \
-            41_scan_stream_default
-          
-          # Verify checksum
-          sha256sum -c checksums.txt
-```
+          Artifacts included:
+          - Binary: 41_scan_stream_default
+          - SBOM: sbom.json
+          - Signatures: Cosign bundles
+          - Checksums: checksums.txt
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
