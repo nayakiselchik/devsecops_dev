@@ -1,49 +1,130 @@
-.PHONY: install build clean sbom scan sign
+name: Build, Sign and Release
 
-APP=41_scan_stream_default.py
-DIST_DIR=dist
-ART_DIR=artifacts
+on:
+  push:
+    branches:
+      - main
+      - stage
+      - dev
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches: [ main, stage ]
 
-install:
-	pip install -r requirements.txt
+permissions:
+  contents: write
+  packages: write
+  id-token: write
 
-build:
-	@echo "Installing PyInstaller..."
-	pip install pyinstaller >/dev/null 2>&1
-	@echo "Creating directories..."
-	mkdir -p $(DIST_DIR) $(ART_DIR)
-	@echo "Building binary..."
-	pyinstaller --onefile $(APP) --name 41_scan_stream_default
-	@echo "Creating artifact archive..."
-	zip -j $(ART_DIR)/artifact.zip $(APP) dist/41_scan_stream_default* || true
-	@echo "Build complete!"
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-sbom:
-	@echo "Generating SBOM..."
-	which syft >/dev/null && syft packages dir:. -o spdx-json > sbom.spdx.json || echo "Syft not installed, skipping SPDX SBOM"
-	which syft >/dev/null && syft packages dir:. -o cyclonedx-json > sbom.cyclonedx.json || echo "Syft not installed, skipping CycloneDX SBOM"
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-scan:
-	@echo "Scanning for vulnerabilities..."
-	which grype >/dev/null && grype sbom:./sbom.spdx.json -o json > vulnerabilities.json || echo "Grype not installed, skipping scan"
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
-sign:
-	@echo "Signing artifacts..."
-	COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes --output-signature artifacts/artifact.zip.sig --output-certificate artifacts/artifact.zip.pem artifacts/artifact.zip || echo "Cosign not installed, skipping signing"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller cyclonedx-bom
 
-clean:
-	@echo "Cleaning build artifacts..."
-	rm -rf build/ dist/ *.spec __pycache__/ $(ART_DIR)/ sbom*.json vulnerabilities.json
+    - name: Build pseudo-binary
+      run: make build
 
-run:
-	python $(APP)
+    - name: Generate SBOM
+      run: |
+        cyclonedx-py requirements -o sbom.json
+        echo "SBOM generated successfully!"
+        ls -lh sbom.json
 
-help:
-	@echo "Available targets:"
-	@echo "  make install  - Install Python dependencies"
-	@echo "  make build    - Build pseudo-binary with PyInstaller"
-	@echo "  make sbom     - Generate SBOM (requires syft)"
-	@echo "  make scan     - Scan SBOM for vulnerabilities (requires grype)"
-	@echo "  make sign     - Sign artifacts with Cosign"
-	@echo "  make clean    - Remove build artifacts"
-	@echo "  make run      - Run the Python script"
+    - name: Install Grype
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+    - name: Scan SBOM with Grype
+      run: |
+        echo "Scanning SBOM for vulnerabilities..."
+        grype sbom:sbom.json -o table || true
+
+    - name: Install Cosign
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: sigstore/cosign-installer@v3.4.0
+
+    - name: Sign artifacts with Cosign
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        echo "Signing artifacts with Cosign..."
+        cosign sign-blob --yes --bundle dist/41_scan_stream_default.cosign-bundle dist/41_scan_stream_default
+        cosign sign-blob --yes --bundle sbom.cosign-bundle sbom.json
+        echo "Signing complete!"
+
+    - name: Create checksums
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        echo "Creating checksums..."
+        cd dist
+        sha256sum 41_scan_stream_default > checksums.txt
+        cd ..
+        sha256sum sbom.json >> dist/checksums.txt
+        cat dist/checksums.txt
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-artifacts
+        path: |
+          dist/
+          sbom.json
+          *.cosign-bundle
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: release-artifacts
+        path: ./artifacts
+
+    - name: Display downloaded artifacts
+      run: |
+        echo "Downloaded artifacts:"
+        ls -R ./artifacts
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}
+        files: |
+          artifacts/dist/41_scan_stream_default
+          artifacts/dist/checksums.txt
+          artifacts/sbom.json
+          artifacts/*.cosign-bundle
+        body: |
+          Release ${{ github.ref_name }}
+
+          Artifacts included:
+          - Binary: 41_scan_stream_default
+          - SBOM: sbom.json (CycloneDX format)
+          - Signatures: Cosign signature bundles
+          - Checksums: SHA256 checksums
+
+          Verification:
+          - Verify checksums: sha256sum -c checksums.txt
+          - Verify Cosign signature with the .cosign-bundle files
+        generate_release_notes: true
