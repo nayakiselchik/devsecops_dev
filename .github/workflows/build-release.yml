@@ -1,0 +1,85 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pyinstaller cyclonedx-bom
+    
+    - name: Build pseudo-binary
+      run: make build
+    
+    - name: Generate SBOM
+      run: |
+        cyclonedx-py requirements -o sbom.json
+    
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@v3
+    
+    - name: Sign artifact
+      run: |
+        cosign sign-blob --yes dist/41_scan_stream_default > 41_scan_stream_default.sig
+    
+    - name: Install Grype
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+    
+    - name: Scan SBOM with Grype
+      run: grype sbom:sbom.json
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: release-artifacts
+        path: |
+          dist/41_scan_stream_default
+          sbom.json
+          41_scan_stream_default.sig
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: release-artifacts
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/41_scan_stream_default
+          sbom.json
+          41_scan_stream_default.sig
+        body: |
+          Release v1.0.0
+          
+          Artifacts:
+          - Signed binary
+          - SBOM (CycloneDX format)
+          - Cosign signature
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
