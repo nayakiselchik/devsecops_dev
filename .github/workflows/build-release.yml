@@ -40,7 +40,9 @@ jobs:
     
     - name: Generate SBOM
       run: |
-        cyclonedx-py requirements requirements.txt -o sbom.json --format json
+        cyclonedx-py requirements -o sbom.json
+        echo "SBOM generated successfully!"
+        ls -lh sbom.json
     
     - name: Install Grype
       run: |
@@ -48,6 +50,7 @@ jobs:
     
     - name: Scan SBOM with Grype
       run: |
+        echo "Scanning SBOM for vulnerabilities..."
         grype sbom:sbom.json -o table || true
     
     - name: Install Cosign
@@ -57,16 +60,20 @@ jobs:
     - name: Sign artifacts with Cosign
       if: startsWith(github.ref, 'refs/tags/')
       run: |
+        echo "Signing artifacts with Cosign..."
         cosign sign-blob --yes --bundle 41_scan_stream_default.cosign-bundle dist/41_scan_stream_default
         cosign sign-blob --yes --bundle sbom.cosign-bundle sbom.json
+        echo "Signing complete!"
     
     - name: Create checksums
       if: startsWith(github.ref, 'refs/tags/')
       run: |
+        echo "Creating checksums..."
         cd dist
         sha256sum 41_scan_stream_default > checksums.txt
         cd ..
         sha256sum sbom.json >> dist/checksums.txt
+        cat dist/checksums.txt
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -94,6 +101,11 @@ jobs:
         name: release-artifacts
         path: ./artifacts
     
+    - name: Display downloaded artifacts
+      run: |
+        echo "Downloaded artifacts:"
+        ls -R ./artifacts
+    
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
@@ -107,9 +119,12 @@ jobs:
           
           Artifacts included:
           - Binary: 41_scan_stream_default
-          - SBOM: sbom.json
-          - Signatures: Cosign bundles
-          - Checksums: checksums.txt
+          - SBOM: sbom.json (CycloneDX format)
+          - Signatures: Cosign signature bundles
+          - Checksums: SHA256 checksums
+          
+          Verification:
+          - Verify checksums: sha256sum -c checksums.txt
+          - Verify Cosign signature with the .cosign-bundle files
         generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      e
